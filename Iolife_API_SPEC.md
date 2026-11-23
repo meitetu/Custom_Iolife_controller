@@ -444,8 +444,13 @@ these fixed codes.
 | `0x15` humidity   | percent                              | `0x1E` = 30%       |
 
 `0x04`/`0x05` are 2-byte values: base byte then decimals. `0x05` returns
-`0xFF` as the base while the unit is off or the outdoor sensor is idle.
-`0x03` control is rejected outside `0x20`-`0x3F` (16.0C-31.5C); the unit
+`0x32` (which the formula turns into 0.0C) while the unit is off or the
+outdoor sensor is idle, and `0xFF` when never reported. Both are treated as
+"missing" rather than a real 0.0C reading: on the real unit the outdoor value
+dropped from 14.2C to exactly 0.0C a few minutes after power off and stayed
+there. Indoor `0x04` keeps reporting while off, so this applies to `0x05`
+(and `0xC0[14]`) only.
+`0x03` control is rejected outside `0x20`-`0x3C` (16.0C-30.0C); the unit
 reports success but keeps the previous target.
 
 ### 11.6 All-state body (`0xC0`) layout (verified)
@@ -467,7 +472,7 @@ query.
 | `[11]` | bit4 = swing UD on, bit0 = swing LR on       | `0x11` = both     |
 | `[12]` | about 1.5C below `[13]`; likely indoor coil  | `0x64` = 25.0C    |
 | `[13]` | indoor temperature (matches prop `0x04`)     | `0x64` = 25.0C    |
-| `[14]` | outdoor temperature (matches prop `0x05`); `0xFF` while idle | `0x4C` = 13.6C |
+| `[14]` | outdoor temperature (matches prop `0x05`); `0x32`/`0xFF` while idle | `0x4C` = 13.6C |
 | `[15]` | decimals: low nibble = `[13]`, high nibble = `[12]` and `[14]` | `0x60` |
 | `[16]` | bit0 = eco, bit1 = purifier                 | `0x03` = both     |
 | `[17..18]` | not observed to change                   |                   |

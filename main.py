@@ -432,9 +432,10 @@ def build_ac_set_properties_payload(values: List[Tuple[int, List[int]]]) -> byte
 def decode_ac_temperature(raw_base: int, decimals: int) -> Optional[float]:
     """Decode a Midea-style temperature: (raw - 50) / 2 plus a decimal nibble.
 
-    0xFF means the value has not been reported.
+    0xFF and 0x32 are sentinels. 0x32 decodes to 0.0C by formula, but the unit
+    sends it for the outdoor sensor while idle, so it is reported as missing.
     """
-    if raw_base == 0xFF:
+    if raw_base in (0xFF, 0x32):
         return None
     base = (raw_base - 50) / 2
     fraction = decimals / 10

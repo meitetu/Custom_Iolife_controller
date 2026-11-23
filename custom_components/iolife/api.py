@@ -331,8 +331,14 @@ def build_ac_set_properties_payload(settings: List[Tuple[int, List[int]]]) -> by
 # Property decoding
 # --------------------------------------------------------------------------- #
 def decode_ac_temperature(raw_base: int, decimals: int) -> Optional[float]:
-    """Decode temperatures: (raw - 50) / 2 plus the decimal nibble."""
-    if raw_base == 0xFF:
+    """Decode temperatures: (raw - 50) / 2 plus the decimal nibble.
+
+    0xFF and 0x32 are sentinels. 0x32 decodes to 0.0C by formula, but the unit
+    sends it for the outdoor sensor while idle (verified against the real unit:
+    the reading dropped from 14.2C to exactly 0.0C a few minutes after power off
+    and stayed there), so it is reported as missing instead.
+    """
+    if raw_base in (0xFF, 0x32):
         return None
     base = (raw_base - 50) / 2
     fraction = decimals / 10

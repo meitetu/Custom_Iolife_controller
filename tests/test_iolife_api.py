@@ -10,6 +10,12 @@ def test_temperature_decode_matches_captures():
     assert api.decode_ac_temperature(0xFF, 0) is None
 
 
+def test_idle_sentinels_are_missing():
+    # The unit sends 0x32 (0.0C by formula) for the outdoor sensor while idle.
+    assert api.decode_ac_temperature(0x32, 0) is None
+    assert api.decode_ac_temperature(0x32, 7) is None
+
+
 def _reply_body(entries):
     """Build a B1 reply body: <id LE16> <result> <size> <value>."""
     body = bytearray([0xB1, len(entries)])
