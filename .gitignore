@@ -1,0 +1,20 @@
+# Credentials and session state (never commit)
+session.json
+*.session.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Home Assistant local config
+config/

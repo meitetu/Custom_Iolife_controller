@@ -36,6 +36,74 @@ AC_REQUEST_CONTROL = 0x0002
 AC_REQUEST_QUERY = 0x0003
 AC_CONTROL_PROPERTY_CMD = 0xB0
 AC_QUERY_PROPERTY_CMD = 0xB1
+AC_OPERATION_MODES: Dict[str, int] = {
+    "auto": 0x01,
+    "cool": 0x02,
+    "dry": 0x03,
+    "heat": 0x04,
+    "fan": 0x05,
+    "smart_dry": 0x06,
+}
+AC_FAN_SPEEDS: Dict[str, int] = {
+    "auto": 0x00,
+    "strong": 0x50,
+    "mid": 0x3C,
+    "weak": 0x14,
+    "mute": 0x01,
+}
+AC_TEMPERATURE_MIN = 16
+AC_TEMPERATURE_MAX = 32
+AC_RESPONSE_ID_PROPERTIES_ACK = 0xB0
+AC_RESPONSE_ID_PROPERTIES = 0xB1
+AC_RESPONSE_ID_STATE = 0xC0
+# Curated set of properties the AC can report in a single B1 query.
+# Verified on RAS-G221E8P(W): 21 properties in one reply.
+AC_ALL_PROPERTIES: List[int] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+    0x0D, 0x0E, 0x10, 0x14, 0x15, 0x17, 0x18, 0x1A, 0x3F, 0x47, 0x48,
+]
+# How each property value is scaled on the wire.
+# 0x03 and 0x06 are single bytes; 0x04/0x05 use Midea's (raw-50)/2 + decimals/10
+# and are decoded specially (see decode_ac_property_value).
+AC_PROPERTY_DIVISORS: Dict[int, int] = {
+    0x03: 2,
+}
+# Properties whose raw value is two bytes: temperature base then decimals.
+AC_TEMPERATURE_PROPERTIES = {0x04, 0x05}
+AC_FAN_NAME_BY_VALUE: Dict[int, str] = {
+    0x66: "auto",
+    0x50: "strong",
+    0x3C: "mid",
+    0x14: "weak",
+    0x01: "mute",
+}
+AC_MODE_NAME_BY_VALUE: Dict[int, str] = {value: name for name, value in AC_OPERATION_MODES.items()}
+AC_MODE_NAME_BY_VALUE[0] = "off"
+AC_PROPERTY_NAMES: Dict[int, str] = {
+    0x01: "power",
+    0x02: "mode",
+    0x03: "temperature",
+    0x04: "indoor_temperature",
+    0x05: "outdoor_temperature",
+    0x06: "wind_speed",
+    0x07: "wind_speed_real",
+    0x08: "wind_swing_ud",
+    0x09: "wind_swing_lr",
+    0x0A: "wind_deflector",
+    0x0B: "power_on_timer",
+    0x0C: "power_off_timer",
+    0x0D: "eco",
+    0x0E: "purifier",
+    0x10: "dry",
+    0x14: "humidity",
+    0x15: "indoor_humidity",
+    0x17: "screen_display",
+    0x18: "no_wind_sense",
+    0x1A: "buzzer",
+    0x3F: "error_code_query",
+    0x47: "high_temperature_monitor",
+    0x48: "rate_select",
+}
 AC_QUERY_PROPERTIES: Dict[str, int] = {
     "power": 0x01,
     "mode": 0x02,
@@ -306,12 +374,177 @@ def build_ac_query_payload(query_type: str = "all") -> bytes:
 
 
 def build_ac_power_payload(state: str) -> bytes:
-    state_value = 1 if state.lower() == "on" else 0
-    body = [AC_CONTROL_PROPERTY_CMD, 1, 0x01, 0x00, 0x01, state_value]
+    return build_ac_control_payload(0x01, [1 if state.lower() == "on" else 0])
+
+
+def build_ac_control_payload(prop_code: int, values: List[int]) -> bytes:
+    body = [AC_CONTROL_PROPERTY_CMD, 1, prop_code, 0x00, len(values)]
+    body.extend(value & 0xFF for value in values)
     body.append(random.randint(1, 254))
     body.append(0x00)
     body[-1] = crc8_854(body, 0, len(body) - 2)
     return build_ac_uart_payload(body, AC_REQUEST_CONTROL)
+
+
+def build_ac_mode_payload(mode: str) -> bytes:
+    return build_ac_control_payload(*build_ac_control_settings(mode=mode)[0])
+
+
+def build_ac_temperature_payload(temperature: float) -> bytes:
+    return build_ac_control_payload(*build_ac_control_settings(temperature=temperature)[0])
+
+
+def build_ac_fan_payload(fan: str) -> bytes:
+    return build_ac_control_payload(*build_ac_control_settings(fan=fan)[0])
+
+
+def build_ac_query_properties_payload(prop_codes: List[int]) -> bytes:
+    """Build a multi-property query (B1 <count> <id LE16>...)."""
+    if not prop_codes:
+        raise ValueError("at least one property code is required")
+    body = [AC_QUERY_PROPERTY_CMD, len(prop_codes)]
+    for prop_code in prop_codes:
+        body.extend([prop_code & 0xFF, (prop_code >> 8) & 0xFF])
+    body.append(random.randint(1, 254))
+    body.append(0x00)
+    body[-1] = crc8_854(body, 0, len(body) - 2)
+    return build_ac_uart_payload(body, AC_REQUEST_QUERY)
+
+
+def build_ac_set_properties_payload(values: List[Tuple[int, List[int]]]) -> bytes:
+    """Build a multi-property control frame (B0 <count> <id LE16><size><value>...).
+
+    Sending several settings in a single frame keeps the AC beep to one.
+    Note: control frames have no result byte; that byte only appears in replies.
+    """
+    if not values:
+        raise ValueError("at least one property is required")
+    body = [AC_CONTROL_PROPERTY_CMD, len(values)]
+    for prop_code, raw in values:
+        body.extend([prop_code & 0xFF, (prop_code >> 8) & 0xFF, len(raw)])
+        body.extend(value & 0xFF for value in raw)
+    body.append(random.randint(1, 254))
+    body.append(0x00)
+    body[-1] = crc8_854(body, 0, len(body) - 2)
+    return build_ac_uart_payload(body, AC_REQUEST_CONTROL)
+
+
+def decode_ac_temperature(raw_base: int, decimals: int) -> Optional[float]:
+    """Decode a Midea-style temperature: (raw - 50) / 2 plus a decimal nibble.
+
+    0xFF means the value has not been reported.
+    """
+    if raw_base == 0xFF:
+        return None
+    base = (raw_base - 50) / 2
+    fraction = decimals / 10
+    return base + (fraction if base >= 0 else -fraction)
+
+
+def decode_ac_property_value(prop_code: int, raw: bytes) -> Any:
+    """Decode a property value.
+
+    0x04/0x05 carry a temperature byte plus a decimal byte; other properties
+    use their first byte directly.
+    """
+    if not raw:
+        return None
+    if prop_code in AC_TEMPERATURE_PROPERTIES and len(raw) >= 2:
+        return decode_ac_temperature(raw[0], raw[1])
+    value = raw[0]
+    divisor = AC_PROPERTY_DIVISORS.get(prop_code)
+    if divisor:
+        return value / divisor
+    return value
+
+
+def parse_ac_properties_response(body: bytes) -> List[Dict[str, Any]]:
+    """Parse a B0/B1 TLV body into a list of property entries."""
+    if len(body) < 2:
+        raise ValueError("property response body is too short")
+    count = body[1]
+    cursor = 2
+    entries: List[Dict[str, Any]] = []
+    for _ in range(count):
+        if len(body) - cursor < 4:
+            break
+        prop_code = int.from_bytes(body[cursor : cursor + 2], "little")
+        result = body[cursor + 2]
+        size = body[cursor + 3]
+        raw = body[cursor + 4 : cursor + 4 + size]
+        cursor += 4 + size
+        entries.append(
+            {
+                "property": prop_code,
+                "name": AC_PROPERTY_NAMES.get(prop_code, "unknown"),
+                "result": result,
+                "error": bool(result & 0x10),
+                "size": size,
+                "rawHex": raw.hex().upper(),
+                "value": decode_ac_property_value(prop_code, raw),
+            }
+        )
+    return entries
+
+
+AC_RUN_MODE_NAMES: Dict[int, str] = {
+    0: "off",
+    1: "cooling",
+    2: "cooling",
+    3: "dry",
+    4: "heating",
+    5: "fan",
+}
+
+
+def decode_ac_state_body(body: bytes) -> Dict[str, Any]:
+    """Decode a 0xC0 all-state body.
+
+    Verified against the multi-property query on RAS-G221E8P(W):
+    target temperature is in payload[4] (0.5C steps, bit 7 is a flag), the
+    operation mode in payload[2] bits 4-6, and the fan speed in payload[3].
+    Temperatures use Midea's (raw - 50) / 2 decoding.
+
+    payload[19]/[20] clearly react to louver swing commands and are exposed
+    raw; their exact encoding is not confirmed (values drift between runs, so
+    they are not decoded into positions here).
+    """
+    if len(body) < 26:
+        raise ValueError("0xC0 state body is too short")
+    mode_value = (body[2] >> 4) & 0x7
+    run_mode = body[2] & 0xF
+    fan_value = body[3] & 0x7F
+    power_on = bool(body[1] & 0x01)
+    return {
+        "power": power_on,
+        "mode": mode_value,
+        "modeName": AC_MODE_NAME_BY_VALUE.get(mode_value, "unknown"),
+        "runMode": run_mode,
+        "runModeName": AC_RUN_MODE_NAMES.get(run_mode, "unknown") if power_on else "off",
+        "fanSpeed": fan_value,
+        "fanName": AC_FAN_NAME_BY_VALUE.get(fan_value, "unknown"),
+        "targetTemperature": (body[4] & 0x7F) / 2,
+        "targetTemperatureFlag": bool(body[4] & 0x80),
+        "indoorTemperature": decode_ac_temperature(body[13], body[15] & 0x0F),
+        # Matches property 0x05. 0xFF while the unit is off / sensor idle.
+        "outdoorTemperature": decode_ac_temperature(body[14], body[15] >> 4),
+        # Always about 1.5C below the indoor value on this unit; likely the
+        # indoor coil. Kept raw because the meaning is not confirmed.
+        "coilTemperature": decode_ac_temperature(body[12], body[15] >> 4),
+        "humidity": body[10],
+        # Swing state flags; they mirror properties 0x08 / 0x09.
+        "swingUDActive": bool(body[11] & 0x10),
+        "swingLRActive": bool(body[11] & 0x01),
+        # Louver/sweep related, encoding not confirmed.
+        "louverUDRaw": body[19],
+        "louverLRRaw": body[20],
+        "eco": bool(body[16] & 0x01),
+        "purifier": bool(body[16] & 0x02),
+        # 0x7F means "not set".
+        "onTimer": body[5],
+        "offTimer": body[7],
+        "rawHex": body.hex().upper(),
+    }
 
 
 class IoLifeClient:
@@ -524,6 +757,29 @@ def build_order_from_payload(
     return order
 
 
+def decode_transparent_reply(
+    session: Dict[str, Any],
+    resp: Dict[str, Any],
+) -> Optional[bytes]:
+    """Decrypt a reply and return the AC body (without the 16-byte UART header/CRC)."""
+    if str(resp.get("errorCode", "")).strip() != "0":
+        return None
+    reply = (resp.get("result") or {}).get("reply")
+    data_key = session.get("dataKey")
+    if not reply or not data_key:
+        return None
+    dec = aes_decrypt_hex(str(reply), data_key, session.get("dataIV") or None)
+    frame = dec_string_to_bytes(dec)
+    parsed = parse_wifidatagram(frame)
+    inner = bytes.fromhex(parsed["bodyHex"])
+    if len(inner) < 18:
+        return None
+    body_length = int.from_bytes(inner[4:6], "little") + 4 - 18
+    if body_length < 0:
+        return None
+    return inner[16 : 16 + body_length]
+
+
 def decode_transparent_reply_if_requested(
     session: Dict[str, Any],
     resp: Dict[str, Any],
@@ -615,7 +871,11 @@ def cmd_transparent(args: argparse.Namespace) -> None:
 
 
 def cmd_ac_query(args: argparse.Namespace) -> None:
-    payload = build_ac_query_payload(query_type=args.query_type).hex().upper()
+    all_props = args.query_type == "all_props"
+    if all_props:
+        payload = build_ac_query_properties_payload(AC_ALL_PROPERTIES).hex().upper()
+    else:
+        payload = build_ac_query_payload(query_type=args.query_type).hex().upper()
     if args.print_payload:
         print(payload)
         return
@@ -636,12 +896,33 @@ def cmd_ac_query(args: argparse.Namespace) -> None:
         order=order,
     )
     decode_transparent_reply_if_requested(session=session, resp=resp, decode_reply=args.decode_reply)
+
+    if not args.decode:
+        return
+    body = decode_transparent_reply(session=session, resp=resp)
+    if body is None:
+        print(json.dumps({"decodeError": "reply could not be decoded"}, ensure_ascii=False))
+        return
+    try:
+        if body[0] in (AC_RESPONSE_ID_PROPERTIES, AC_RESPONSE_ID_PROPERTIES_ACK):
+            decoded: Any = {"properties": parse_ac_properties_response(body)}
+        elif body[0] == AC_RESPONSE_ID_STATE:
+            decoded = {"state": decode_ac_state_body(body)}
+        else:
+            decoded = {"unknown": body.hex().upper()}
+    except Exception as exc:
+        decoded = {"decodeError": str(exc), "bodyHex": body.hex().upper()}
+    print(json.dumps(decoded, ensure_ascii=False, indent=2))
 
 
 def cmd_ac_power(args: argparse.Namespace) -> None:
-    payload = build_ac_power_payload(state=args.state).hex().upper()
+    state_value = 1 if args.state.lower() == "on" else 0
+    if args.batch:
+        payload = build_ac_set_properties_payload([(0x01, [state_value])])
+    else:
+        payload = build_ac_power_payload(state=args.state)
     if args.print_payload:
-        print(payload)
+        print(payload.hex().upper())
         return
 
     session, session_id = resolve_session_and_session_id(args.session_id)
@@ -660,6 +941,72 @@ def cmd_ac_power(args: argparse.Namespace) -> None:
         order=order,
     )
     decode_transparent_reply_if_requested(session=session, resp=resp, decode_reply=args.decode_reply)
+
+
+def build_ac_control_settings(
+    mode: Optional[str] = None,
+    temperature: Optional[float] = None,
+    fan: Optional[str] = None,
+) -> List[Tuple[int, List[int]]]:
+    settings: List[Tuple[int, List[int]]] = []
+    if mode is not None:
+        key = mode.strip().lower()
+        if key not in AC_OPERATION_MODES:
+            supported = ", ".join(AC_OPERATION_MODES.keys())
+            raise ValueError(f"unsupported --mode '{mode}'. use: {supported}")
+        settings.append((0x02, [AC_OPERATION_MODES[key]]))
+    if temperature is not None:
+        if not AC_TEMPERATURE_MIN <= temperature <= AC_TEMPERATURE_MAX:
+            raise ValueError(
+                f"--temperature must be between {AC_TEMPERATURE_MIN} and {AC_TEMPERATURE_MAX}"
+            )
+        # The wire format uses 0.5C steps: 24C -> 0x30, 30C -> 0x3C.
+        settings.append((0x03, [int(round(temperature * 2))]))
+    if fan is not None:
+        key = fan.strip().lower()
+        if key not in AC_FAN_SPEEDS:
+            supported = ", ".join(AC_FAN_SPEEDS.keys())
+            raise ValueError(f"unsupported --fan '{fan}'. use: {supported}")
+        settings.append((0x06, [AC_FAN_SPEEDS[key]]))
+    return settings
+
+
+def cmd_ac_control(args: argparse.Namespace) -> None:
+    if args.mode is None and args.temperature is None and args.fan is None:
+        raise RuntimeError("at least one of --mode/--temperature/--fan is required")
+
+    settings = build_ac_control_settings(args.mode, args.temperature, args.fan)
+    if args.print_payload:
+        if args.batch:
+            print(build_ac_set_properties_payload(settings).hex().upper())
+        else:
+            for prop_code, raw in settings:
+                print(build_ac_control_payload(prop_code, raw).hex().upper())
+        return
+
+    session, session_id = resolve_session_and_session_id(args.session_id)
+    # --batch sends every setting in one frame, so the AC beeps only once.
+    payloads = (
+        [build_ac_set_properties_payload(settings)]
+        if args.batch
+        else [build_ac_control_payload(prop_code, raw) for prop_code, raw in settings]
+    )
+    for payload in payloads:
+        order = build_order_from_payload(
+            session=session,
+            payload_hex=payload.hex().upper(),
+            appliance_id=args.appliance_id,
+            msg_type=args.msg_type,
+            msg_id=args.msg_id,
+            verbose=args.verbose,
+        )
+        resp = send_transparent_order(
+            language=args.language,
+            session_id=session_id,
+            appliance_id=args.appliance_id,
+            order=order,
+        )
+        decode_transparent_reply_if_requested(session=session, resp=resp, decode_reply=args.decode_reply)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -699,7 +1046,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ac_query = sub.add_parser("ac-query", help="AC(0xAC) query payload builder + transparent send")
     p_ac_query.add_argument("--appliance-id", required=True)
-    p_ac_query.add_argument("--query-type", default="all", help="all or one property key (e.g. power/mode/temperature)")
+    p_ac_query.add_argument("--query-type", default="all", help="all, all_props, or one property key (e.g. power/mode/temperature)")
+    p_ac_query.add_argument("--decode", action="store_true", help="decode the AC body into readable fields")
     p_ac_query.add_argument("--print-payload", action="store_true", help="print payload hex and exit")
     p_ac_query.add_argument("--msg-type", type=int, default=32)
     p_ac_query.add_argument("--msg-id", type=int)
@@ -711,6 +1059,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ac_power = sub.add_parser("ac-power", help="AC(0xAC) power control + transparent send")
     p_ac_power.add_argument("--appliance-id", required=True)
     p_ac_power.add_argument("--state", required=True, choices=["on", "off"])
+    p_ac_power.add_argument("--batch", action="store_true", help="send a multi-property (B0) frame instead")
     p_ac_power.add_argument("--print-payload", action="store_true", help="print payload hex and exit")
     p_ac_power.add_argument("--msg-type", type=int, default=32)
     p_ac_power.add_argument("--msg-id", type=int)
@@ -718,6 +1067,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_ac_power.add_argument("--decode-reply", action="store_true")
     p_ac_power.add_argument("--verbose", action="store_true")
     p_ac_power.set_defaults(func=cmd_ac_power)
+
+    p_ac_control = sub.add_parser("ac-control", help="AC(0xAC) mode/temperature/fan control + transparent send")
+    p_ac_control.add_argument("--appliance-id", required=True)
+    p_ac_control.add_argument("--mode", choices=list(AC_OPERATION_MODES.keys()))
+    p_ac_control.add_argument("--temperature", type=float, help="target temperature (16-32, 0.5C steps)")
+    p_ac_control.add_argument("--fan", choices=list(AC_FAN_SPEEDS.keys()), help="fan speed")
+    p_ac_control.add_argument("--batch", action="store_true", help="send one multi-property (B0) frame (single beep)")
+    p_ac_control.add_argument("--print-payload", action="store_true", help="print payload hex and exit")
+    p_ac_control.add_argument("--msg-type", type=int, default=32)
+    p_ac_control.add_argument("--msg-id", type=int)
+    p_ac_control.add_argument("--session-id")
+    p_ac_control.add_argument("--decode-reply", action="store_true")
+    p_ac_control.add_argument("--verbose", action="store_true")
+    p_ac_control.set_defaults(func=cmd_ac_control)
     return parser
 
 

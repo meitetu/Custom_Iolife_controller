@@ -1,0 +1,25 @@
+{
+  "title": "Toshiba IoLIFE",
+  "config": {
+    "step": {
+      "user": {
+        "title": "IoLIFE account",
+        "description": "Sign in with the same account you use in the IoLIFE app.",
+        "data": {
+          "email": "Email address",
+          "password": "Password",
+          "language": "API language (ja_JP)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    },
+    "error": {
+      "invalid_auth": "The email or password was rejected.",
+      "cannot_connect": "Could not reach the IoLIFE cloud.",
+      "no_devices": "No air conditioner (0xAC) was found on this account.",
+      "unknown": "Unexpected error."
+    }
+  }
+}

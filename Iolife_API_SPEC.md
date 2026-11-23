@@ -15,6 +15,7 @@ It is a practical spec focused on reproducible requests.
   - `transparent`
   - `ac-query`
   - `ac-power`
+  - `ac-control`
 
 ## 2. Constants
 
@@ -280,6 +281,51 @@ Property codes are implemented in `AC_QUERY_PROPERTIES`:
 - random byte + CRC8
 - wrapped with request type `0x0002`
 
+`--batch` instead builds the multi-property form:
+
+- body prefix: `B0 <count>`
+- For each setting: `propertyId(LE16) result(00) size raw-value...`
+- random byte + CRC8
+- wrapped with request type `0x0002`
+
+### 10.5 Multi-property frames (verified)
+
+Both directions support many properties in one frame; the unit replies with
+one frame too.
+
+Query (`B1`, request type `0x0003`):
+
+```
+B1 <count> <id LE16>...
+```
+
+Response (`B1`, request type `0x8003`):
+
+```
+B1 <count> [<id LE16> <result> <size> <value>]...
+```
+
+`result & 0x10` means the property failed. `size == 0` means the property is
+unsupported on this model. A 21-property query returned all basic settings in
+a single reply on RAS-G221E8P(W).
+
+Control (`B0`, request type `0x0002`) uses the same TLV layout but **without**
+the result byte:
+
+```
+B0 <count> <id LE16> <size> <value>...
+```
+
+The result byte only appears in replies. If it is wrongly included in a
+control frame, the remaining TLVs are parsed shifted and the settings are
+silently dropped (the unit still ACKs with `errorCode: 0`).
+
+Response request-type mirrors the query: `0x0002` for control, `0x8002` for
+its ACK, `0x0003` for query, `0x8003` for its reply.
+
+> Note: the AC beeps on every control frame received. Use the multi-property
+> form when changing several settings at once to avoid repeated beeps.
+
 ## 11. AC Control Property Reference
 
 ### 11.1 AC_24 Control Property Codes
@@ -376,15 +422,105 @@ Property codes are implemented in `AC_QUERY_PROPERTIES`:
 
 #### Fan Speed (`fanspeedValue` / `0x06`)
 
+Observed values on RAS-G221E8P(W). The reported value is not 0-100: it uses
+these fixed codes.
+
 | Constant            | Value  | Description |
 |---------------------|--------|-------------|
-| `BYTE_FANSPEED_AUTO` | `0x00` | 自動        |
+| `BYTE_FANSPEED_AUTO` | `0x66` | 自動        |
 | `BYTE_FANSPEED_HIGH` | `0x50` | 強          |
 | `BYTE_FANSPEED_MID`  | `0x3C` | 中          |
 | `BYTE_FANSPEED_LOW`  | `0x14` | 弱          |
 | `BYTE_FANSPEED_MUTE` | `0x01` | おやすみ     |
 
-## 12. Error Behavior
+### 11.5 Property value scaling (verified)
+
+| Property          | Wire encoding                        | Example            |
+|-------------------|--------------------------------------|--------------------|
+| `0x03` temperature| target × 2 (0.5C steps)              | `0x31` = 24.5C     |
+| `0x04` indoor     | `(raw - 50) / 2 + decimals / 10`     | `64 00` = 25.0C    |
+| `0x05` outdoor    | `(raw - 50) / 2 + decimals / 10`     | `4C 06` = 13.6C    |
+| `0x06` fan speed  | fixed code (see 11.4)                | `0x50` = 強        |
+| `0x15` humidity   | percent                              | `0x1E` = 30%       |
+
+`0x04`/`0x05` are 2-byte values: base byte then decimals. `0x05` returns
+`0xFF` as the base while the unit is off or the outdoor sensor is idle.
+`0x03` control is rejected outside `0x20`-`0x3F` (16.0C-31.5C); the unit
+reports success but keeps the previous target.
+
+### 11.6 All-state body (`0xC0`) layout (verified)
+
+`ac-query --query-type all` returns a `0xC0` body. Confirmed by probing one
+setting at a time and diffing, plus cross-checking against the multi-property
+query.
+
+| Offset | Meaning                                      | Example           |
+|--------|----------------------------------------------|-------------------|
+| `[0]`  | response id `0xC0`                           | `C0`              |
+| `[1]`  | bit0 = power on                              | `01` = on         |
+| `[2]`  | bits 4-6 = operation mode, bits 0-3 = run mode | `0x22` = cool, running cool |
+| `[3]`  | fan speed code (bit0-6)                      | `0x50` = 強       |
+| `[4]`  | bit0-6 = target × 2, bit7 = always set       | `0xB0` = 24.0C    |
+| `[5]`  | on-timer raw (`0x7F` = not set)              | `7F`              |
+| `[7]`  | off-timer raw (`0x7F` = not set)             | `7F`              |
+| `[10]` | indoor humidity (%)                          | `0x1E` = 30%      |
+| `[11]` | bit4 = swing UD on, bit0 = swing LR on       | `0x11` = both     |
+| `[12]` | about 1.5C below `[13]`; likely indoor coil  | `0x64` = 25.0C    |
+| `[13]` | indoor temperature (matches prop `0x04`)     | `0x64` = 25.0C    |
+| `[14]` | outdoor temperature (matches prop `0x05`); `0xFF` while idle | `0x4C` = 13.6C |
+| `[15]` | decimals: low nibble = `[13]`, high nibble = `[12]` and `[14]` | `0x60` |
+| `[16]` | bit0 = eco, bit1 = purifier                 | `0x03` = both     |
+| `[17..18]` | not observed to change                   |                   |
+| `[19]` | reacts to UD swing writes; encoding unclear  | `0xF0` while off  |
+| `[20]` | reacts to LR swing writes; encoding unclear  | `0xF0` while off  |
+| `[25]` | CRC8 over `[0..24]`                          |                   |
+
+Mode values follow section 11.4. `run mode` mirrors the setting while powered
+on, except in auto mode where it reports `5` (fan). Notes:
+
+- The firmware does **not** pack mode/target temperature like the Midea
+  reference library; `[2]` bits 4-6 and `[4]` are Toshiba's own layout.
+- With no commands sent, ten consecutive queries returned byte-identical
+  bodies.
+- `[19]`/`[20]` were first assumed to be running-state flags because they
+  change with the operation mode, but they actually track louver swing
+  commands and their values drift between runs. They are exposed raw only.
+
+### 11.7 Control behaviour notes (verified)
+
+- Every control frame makes the unit beep, including no-op writes.
+- Multi-property (`B0`) frames apply all settings at once and beep once.
+- The Midea `0x40` full-state frame is **not** accepted by this unit; it
+  times out (`HTTP 504`). Use `B0` property frames instead. There is
+  currently no way to suppress the beep.
+- `0x06` fan speed accepts `0x66` (auto) even though the AC_24 reference
+  table lists `0x00`; reading uses `0x66`. In auto mode the reported fan
+  speed is always `0x66`.
+- Writing `0x03` out of range is acknowledged (`errorCode: 0`) but silently
+  ignored. The same holds for no-op writes of `0x17` (screen), `0x1A`
+  (buzzer), `0x0A` (deflector) and `0x0B`/`0x0C` (timers): they report
+  success and change nothing.
+- Properties that do respond on this unit: `0x01` power, `0x02` mode,
+  `0x03` target temperature, `0x06` fan speed, `0x08` swing UD, `0x09`
+  swing LR, `0x0D` eco, `0x0E` purifier. `0x0B`, `0x0C`, `0x0A`, `0x17`,
+  `0x1A` are accepted but do nothing.
+
+## 12. Protocol lineage
+
+This protocol is the Midea AC UART protocol wrapped in Toshiba extensions.
+
+| Item | Evidence |
+|------|----------|
+| CRC8 table | `CRC8_854_TABLE` is byte-identical to `msmart/crc8.py` |
+| Command ids | `0x41`/`0xC0`/`0xB0`/`0xB1` match `FrameType`/`ResponseId` |
+| TLV form | `B0 <count> <id LE16> <result> <size> <value>` matches `SetPropertiesCommand` / `PropertiesResponse` |
+| Timers | `0x7F` means "not set", as in Midea |
+| Differences | Toshiba uses its own property ids, packs mode/target temperature differently, and wraps everything in `55 AA CC 33` + CRC16 inside a `5A 5A` datagram |
+
+Midea's parent company acquired Toshiba Lifestyle in 2016, which explains the
+shared protocol.
+
+## 13. Error Behavior
 
 ### HTTP errors
 
@@ -399,7 +535,7 @@ Property codes are implemented in `AC_QUERY_PROPERTIES`:
   - example: `{"code":"","message":"invalidSession"}`
   - this is not normalized by `_require_success`; caller should handle it.
 
-## 13. CLI to API Mapping
+## 14. CLI to API Mapping
 
 - `login` -> `user/login/id/get`, `user/login`
 - `devices` -> `appliance/user/home/page/list/info`
@@ -407,8 +543,9 @@ Property codes are implemented in `AC_QUERY_PROPERTIES`:
 - `transparent` -> `appliance/transparent/send`
 - `ac-query` -> local AC payload builder + `transparent`
 - `ac-power` -> local AC control payload builder + `transparent`
+- `ac-control` -> local AC control payload builder (`B0` multi-property + `--batch`) + `transparent`
 
-## 14. Security Notes
+## 15. Security Notes
 
 - Credentials and session tokens are sensitive.
 - `session.json` includes session/auth data in plaintext.

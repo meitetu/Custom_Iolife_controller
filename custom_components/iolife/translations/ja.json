@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "IoLIFE アカウント",
+        "description": "IoLIFE アプリと同じアカウントでサインインします。",
+        "data": {
+          "email": "メールアドレス",
+          "password": "パスワード",
+          "language": "API の言語 (ja_JP)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "このアカウントはすでに設定済みです。"
+    },
+    "error": {
+      "invalid_auth": "メールアドレスかパスワードが違います。",
+      "cannot_connect": "IoLIFE クラウドに接続できませんでした。",
+      "no_devices": "このアカウントにエアコン (0xAC) が見つかりません。",
+      "unknown": "予期しないエラーが発生しました。"
+    }
+  }
+}
