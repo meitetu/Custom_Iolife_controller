@@ -13,7 +13,16 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import api
-from .const import CONF_EMAIL, CONF_LANGUAGE, CONF_PASSWORD, DEFAULT_LANGUAGE, DOMAIN, DEFAULT_SCAN_INTERVAL
+from .const import (
+    CONF_EMAIL,
+    CONF_HUMIDITY_SENSOR,
+    CONF_LANGUAGE,
+    CONF_PASSWORD,
+    CONF_TEMPERATURE_SENSOR,
+    DEFAULT_LANGUAGE,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +36,22 @@ class IolifeData:
     appliance_id: str
     name: str
     values: Dict[int, Any]
+    room_temperature: float | None = None
+    room_humidity: float | None = None
+
+
+def _read_sensor(hass: HomeAssistant, entity_id: str | None) -> float | None:
+    """Return a numeric sensor state, or None when unavailable."""
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if state is None or state.state in ("unknown", "unavailable", ""):
+        return None
+    try:
+        return float(state.state)
+    except (TypeError, ValueError):
+        _LOGGER.warning("%s is not numeric: %s", entity_id, state.state)
+        return None
 
 
 class IolifeCoordinator(DataUpdateCoordinator[Dict[str, IolifeData]]):
@@ -80,6 +105,13 @@ class IolifeCoordinator(DataUpdateCoordinator[Dict[str, IolifeData]]):
 
     async def _async_update_data(self) -> Dict[str, IolifeData]:
         assert self.client is not None
+        # External sensors are read from the state machine, so a slow or
+        # sleeping AC still gets a room temperature in the UI.
+        temperature = _read_sensor(
+            self.hass, self.entry.data.get(CONF_TEMPERATURE_SENSOR)
+        )
+        humidity = _read_sensor(self.hass, self.entry.data.get(CONF_HUMIDITY_SENSOR))
+
         result: Dict[str, IolifeData] = {}
         for appliance in self.appliances:
             appliance_id = str(appliance["id"])
@@ -97,6 +129,8 @@ class IolifeCoordinator(DataUpdateCoordinator[Dict[str, IolifeData]]):
                 appliance_id=appliance_id,
                 name=str(appliance.get("name") or appliance_id),
                 values=values,
+                room_temperature=temperature,
+                room_humidity=humidity,
             )
         return result
 

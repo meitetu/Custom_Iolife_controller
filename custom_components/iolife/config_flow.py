@@ -7,10 +7,18 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers import aiohttp_client, selector
 
 from . import api
-from .const import CONF_EMAIL, CONF_LANGUAGE, CONF_PASSWORD, DEFAULT_LANGUAGE, DOMAIN
+from .const import (
+    CONF_EMAIL,
+    CONF_HUMIDITY_SENSOR,
+    CONF_LANGUAGE,
+    CONF_PASSWORD,
+    CONF_TEMPERATURE_SENSOR,
+    DEFAULT_LANGUAGE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,13 +64,33 @@ class IolifeConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     await self.async_set_unique_id(user_input[CONF_EMAIL].lower())
                     self._abort_if_unique_id_configured()
-                    return self.async_create_entry(
-                        title=user_input[CONF_EMAIL],
-                        data=user_input,
-                    )
+                    self._credentials = user_input
+                    return await self.async_step_sensors()
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
         )
+
+    async def async_step_sensors(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Optionally pick external room temperature / humidity sensors."""
+        if user_input is not None:
+            data = {**self._credentials, **user_input}
+            return self.async_create_entry(
+                title=self._credentials[CONF_EMAIL], data=data
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_TEMPERATURE_SENSOR): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_HUMIDITY_SENSOR): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+            }
+        )
+        return self.async_show_form(step_id="sensors", data_schema=schema)

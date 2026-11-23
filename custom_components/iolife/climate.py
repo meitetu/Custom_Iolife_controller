@@ -18,7 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import api
 from .const import DOMAIN, SUPPORTED_FAN_MODES
-from .coordinator import IolifeCoordinator
+from .coordinator import IolifeCoordinator, IolifeData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class IolifeClimate(CoordinatorEntity[IolifeCoordinator], ClimateEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = api.AC_TEMPERATURE_STEP
     _attr_min_temp = api.AC_TEMPERATURE_MIN
     _attr_max_temp = api.AC_TEMPERATURE_MAX
@@ -88,9 +88,12 @@ class IolifeClimate(CoordinatorEntity[IolifeCoordinator], ClimateEntity):
 
     # -- helpers -----------------------------------------------------------
     @property
+    def _entry(self) -> IolifeData | None:
+        return (self.coordinator.data or {}).get(self._appliance_id)
+
+    @property
     def _values(self) -> dict[int, Any]:
-        data = self.coordinator.data or {}
-        entry = data.get(self._appliance_id)
+        entry = self._entry
         return entry.values if entry else {}
 
     @property
@@ -99,11 +102,15 @@ class IolifeClimate(CoordinatorEntity[IolifeCoordinator], ClimateEntity):
 
     # -- state -------------------------------------------------------------
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
+        """Prefer the configured room sensor, fall back to the AC's own value."""
+        entry = self._entry
+        if entry and entry.room_temperature is not None:
+            return entry.room_temperature
         return self._values.get(api.PROP_INDOOR_TEMP)
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         return self._values.get(api.PROP_TARGET_TEMP)
 
     @property
@@ -132,9 +139,15 @@ class IolifeClimate(CoordinatorEntity[IolifeCoordinator], ClimateEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         values = self._values
+        entry = self._entry
         return {
+            # The AC's own reading, kept for comparison with the room sensor.
+            "ac_indoor_temperature": values.get(api.PROP_INDOOR_TEMP),
             "outdoor_temperature": values.get(api.PROP_OUTDOOR_TEMP),
-            "indoor_humidity": values.get(api.PROP_HUMIDITY),
+            "indoor_humidity": (
+                entry.room_humidity if entry and entry.room_humidity is not None
+                else values.get(api.PROP_HUMIDITY)
+            ),
             "eco": values.get(api.PROP_ECO),
             "purifier": values.get(api.PROP_PURIFIER),
             "error_code": values.get(api.PROP_ERROR_CODE),

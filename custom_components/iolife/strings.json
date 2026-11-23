@@ -10,6 +10,14 @@
           "password": "Password",
           "language": "API language (ja_JP)"
         }
+      },
+      "sensors": {
+        "title": "Room sensors",
+        "description": "Optionally choose a room temperature sensor (for example a SwitchBot thermometer). It is shown as the current temperature, because the air conditioner does not always report one.",
+        "data": {
+          "temperature_sensor": "Room temperature sensor",
+          "humidity_sensor": "Room humidity sensor"
+        }
       }
     },
     "abort": {
